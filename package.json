@@ -6,7 +6,8 @@
     "dev": "nodemon index.js",
     "start": "node index.js",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "asus": "nodemon asus/index.js"
+    "promoSell": "nodemon promoSell/index.js",
+    "listino": "nodemon asusListino/index.js"
   },
   "author": "",
   "license": "ISC",
