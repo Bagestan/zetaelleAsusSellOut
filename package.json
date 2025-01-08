@@ -1,0 +1,19 @@
+{
+  "name": "updmag",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon index.js",
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "asus": "nodemon asus/index.js"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "nodemon": "^3.1.7",
+    "odbc": "^2.4.9",
+    "read-excel-file": "^5.8.6"
+  }
+}
