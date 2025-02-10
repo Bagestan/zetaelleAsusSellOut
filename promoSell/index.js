@@ -1,5 +1,6 @@
 const odbc = require("odbc");
 const readXlsxFile = require("read-excel-file/node");
+const fs = require("fs");
 
 const connectionConfig = { connectionString: "DSN=EasyFattNode" };
 
@@ -7,9 +8,7 @@ async function openConnection() {
   return await odbc.connect(connectionConfig);
 }
 
-async function closeConnection(connection) {
-  connection.close();
-}
+const closeConnection = (connection) => connection.close();
 
 async function executeQuery(connection, query) {
   const result = await connection.query(query);
@@ -17,51 +16,147 @@ async function executeQuery(connection, query) {
 }
 
 async function readExcel() {
+  function excelRowsNormalizer(rows) {
+    const columnNames = [
+      "CodBarre",
+      "CodArticoloForn",
+      "CodArticolo",
+      "DATE_START",
+      "DATE_END",
+      "PrezzoNettoForn",
+      "Extra2",
+      "Extra4",
+      "PrezzoIvato1",
+      "PrezzoIvato4",
+      "Extra3",
+    ];
+
+    const normalizedData = rows.map((row) =>
+      columnNames.reduce((acc, key, index) => {
+        acc[key] = row[index];
+        return acc;
+      }, {})
+    );
+
+    return normalizedData;
+  }
+
   const path = "promoSell/file.xlsx";
   const rows = await readXlsxFile(path);
   return await excelRowsNormalizer(rows);
 }
 
-async function excelRowsNormalizer(rows) {
-  const columnNames = [
-    "CodBarre",
-    "CodArticoloForn",
-    "CodArticolo",
-    "DATE_START",
-    "DATE_END",
+function formatStringNumbers(asusData) {
+  const fieldsToFormat = [
     "PrezzoNettoForn",
-    "Extra2",
-    "Extra4",
     "PrezzoIvato1",
     "PrezzoIvato4",
-    "Extra3",
+    "Extra2",
+    "Extra4",
   ];
 
-  const normalizedData = rows.map((row) =>
-    columnNames.reduce((acc, key, index) => {
-      acc[key] = row[index];
-      return acc;
-    }, {})
-  );
+  function formatNumber(value) {
+    if (typeof value !== "string") return NaN;
+    let cleaned = value
+      .replace(/[€\s]/g, "")
+      .replace(/\./g, "")
+      .replace(",", ".");
 
-  return normalizedData;
+    let number = parseFloat(cleaned);
+    return isNaN(number) ? null : number;
+  }
+
+  return asusData.map((product) => ({
+    ...product,
+    ...Object.fromEntries(
+      fieldsToFormat.map((field) => [field, formatNumber(product[field])])
+    ),
+  }));
 }
 
 async function main() {
   const connection = await openConnection();
 
   try {
-    const asusData = await readExcel();
+    let asusData = await readExcel();
+    asusData = formatStringNumbers(asusData);
+    await clearPreviousPromo(connection);
 
-    const DaneaProducts = await findAllArticles(connection, asusData);
-
+    const DaneaProducts = await findAsusArticles(connection, asusData);
     await updateAsusData(connection, DaneaProducts, asusData);
   } catch (err) {
     console.error(`Error!!!`, err);
   } finally {
     console.info("Done, closing connection...");
-    await closeConnection(connection);
+    closeConnection(connection);
   }
+}
+
+async function clearPreviousPromo(connection) {
+  const previousPromo = await getPreviousPromo(connection);
+
+  previousPromo.forEach(
+    async (product) => await clearProduct(connection, product)
+  );
+}
+
+async function getPreviousPromo(connection) {
+  const selExpiredPromo = `
+  SELECT 
+    TArticoli.IDArticolo,
+    TArticoli.CodArticolo,
+    TArticoli.Desc,
+    TArticoli.CodBarre,
+    TArticoli.Extra1,
+    TArticoli.Extra2,
+    TArticoli.Extra3,
+    TArticoli.Extra4,
+    TArticoliMagazz.QtaCaricata,
+    TArticoliMagazz.QtaScaricata
+  FROM 
+    TArticoli 
+  INNER JOIN 
+    TArticoliMagazz 
+  ON 
+    TArticoli.IDArticolo = TArticoliMagazz.IDArticolo
+  WHERE 
+    TArticoli.Extra1 IS NOT NULL
+  GROUP BY
+    TArticoli.IDArticolo,
+    TArticoli.CodArticolo,
+    TArticoli.Desc,
+    TArticoli.CodBarre,
+    TArticoli.Extra1,
+    TArticoli.Extra2,
+    TArticoli.Extra3,
+    TArticoli.Extra4,
+    TArticoliMagazz.QtaCaricata,
+    TArticoliMagazz.QtaScaricata;
+    `;
+
+  let result = await executeQuery(connection, selExpiredPromo);
+  return result.map((i) => ({ ...i, QTA: i.QtaCaricata - i.QtaScaricata }));
+}
+
+async function clearProduct(connection, product) {
+  if (product.Extra1.includes("scaduto")) return;
+
+  const clearAll = `
+    PrezzoIvato4 = 0,
+    PrezzoNetto4 = 0,
+    Extra2 = '',
+    Extra4 = '',`;
+
+  const updatePreviousPromo = `
+  UPDATE 
+    TArticoli 
+  SET 
+    ${product.QTA <= 0 ? clearAll : ""}
+    Extra1 = '${product.Extra1} scaduto'
+  WHERE 
+    IDArticolo = ${product.IDArticolo};
+  `;
+  await executeQuery(connection, updatePreviousPromo);
 }
 
 async function updateAsusData(connection, DaneaProducts, asusData) {
@@ -70,44 +165,34 @@ async function updateAsusData(connection, DaneaProducts, asusData) {
       return item.CodArticolo == article.CodArticolo;
     });
 
-    const commandSelect = `SELECT CodArticolo, CodArticoloForn, CodBarre, Extra1, Extra2 FROM TArticoli WHERE CodArticolo = '${article.CodArticolo}';`;
     const commandUpdate = `UPDATE TArticoli SET
-     CodArticoloForn = '${asusInfo.CodArticoloForn}',
-     CodBarre = '${asusInfo.CodBarre}',
-     Extra1 = '${formatDate(asusInfo.DATE_START)} > ${formatDate(
+       CodArticoloForn = '${asusInfo.CodArticoloForn}',
+       CodBarre = '${asusInfo.CodBarre}',
+       Extra1 = '${formatDate(asusInfo.DATE_START)} > ${formatDate(
       asusInfo.DATE_END
     )}',
-     Extra2 = '€ ${formatValue(asusInfo.Extra2)}',
-     Extra3 = '${asusInfo.Extra3}',
-     Extra4 = '€ ${formatValue(asusInfo.Extra4)}',
-     PrezzoIvato1 = '${asusInfo.PrezzoIvato1}',
-     PrezzoIvato4 = '${asusInfo.PrezzoIvato4}',
-     PrezzoNetto4 = '${formatValue(removeIVA(asusInfo.PrezzoIvato4))}',
-     PrezzoNettoForn = '${asusInfo.PrezzoNettoForn}'
-     WHERE CodArticolo = '${article.CodArticolo}';`;
-
-    console.log("🚀 ~ updateAsusData ~ commandUpdate:", commandUpdate);
-
-    // console.log("🚀 ~ updateAsusData ~ commandUpdate:", commandUpdate);
+       Extra2 = '€ ${formatValue(asusInfo.Extra2)}',
+       Extra3 = '${asusInfo.Extra3}',
+       Extra4 = '€ ${formatValue(asusInfo.Extra4)}',
+       PrezzoIvato1 = '${asusInfo.PrezzoIvato1}',
+       PrezzoIvato4 = '${asusInfo.PrezzoIvato4}',
+       PrezzoNetto4 = '${formatValue(removeIVA(asusInfo.PrezzoIvato4))}',
+       PrezzoNettoForn = '${asusInfo.PrezzoNettoForn}'
+       WHERE CodArticolo = '${article.CodArticolo}';`;
 
     try {
-      await executeQuery(connection, commandUpdate).finally(() =>
-        console.info(
-          "✅ CodArticolo:",
-          article.CodArticolo,
-          " | CodBarre:",
-          article.CodBarre,
-          " | CodArticoloForn:",
-          asusInfo.CodArticoloForn
-        )
-      );
+      await executeQuery(connection, commandUpdate).finally(() => {
+        console.info(" ✅ CodArticolo:", article.CodArticolo);
+        console.info(" ✅ CodBarre:", article.CodBarre);
+        console.info(" ✅ CodArticoloForn:", asusInfo.CodArticoloForn);
+      });
     } catch (err) {
       console.error(`Error!!!`, err);
     }
   }
 }
 
-async function findAllArticles(connection, asusData) {
+async function findAsusArticles(connection, asusData) {
   console.info("Searching for articles...");
 
   let result = [];
@@ -159,9 +244,7 @@ const formatDate = (date) => {
   return new Date(date).toLocaleDateString("it-IT", options);
 };
 
-const formatValue = (value) => {
-  return `${Number(value).toFixed(2)}`;
-};
+const formatValue = (value) => `${Number(value).toFixed(2)}`;
 
 const removeIVA = (price) => price / 1.22;
 
