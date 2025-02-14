@@ -56,7 +56,7 @@ function formatStringNumbers(asusData) {
   ];
 
   function formatNumber(value) {
-    if (typeof value !== "string") return NaN;
+    if (typeof value !== "string") return value;
     let cleaned = value
       .replace(/[€\s]/g, "")
       .replace(/\./g, "")
@@ -160,31 +160,44 @@ async function clearProduct(connection, product) {
 }
 
 async function updateAsusData(connection, DaneaProducts, asusData) {
-  for (const article of DaneaProducts) {
-    const asusInfo = asusData.find((item) => {
-      return item.CodArticolo == article.CodArticolo;
-    });
+  const asusMap = new Map(
+    asusData.map((item) => [String(item.CodArticolo).trim(), item])
+  );
 
-    const commandUpdate = `UPDATE TArticoli SET
-       CodArticoloForn = '${asusInfo.CodArticoloForn}',
-       CodBarre = '${asusInfo.CodBarre}',
-       Extra1 = '${formatDate(asusInfo.DATE_START)} > ${formatDate(
-      asusInfo.DATE_END
-    )}',
-       Extra2 = '€ ${formatValue(asusInfo.Extra2)}',
-       Extra3 = '${asusInfo.Extra3}',
-       Extra4 = '€ ${formatValue(asusInfo.Extra4)}',
-       PrezzoIvato1 = '${asusInfo.PrezzoIvato1}',
-       PrezzoIvato4 = '${asusInfo.PrezzoIvato4}',
-       PrezzoNetto4 = '${formatValue(removeIVA(asusInfo.PrezzoIvato4))}',
-       PrezzoNettoForn = '${asusInfo.PrezzoNettoForn}'
-       WHERE CodArticolo = '${article.CodArticolo}';`;
+  for (const article of DaneaProducts) {
+    const asusInfo = asusMap.get(article.CodArticolo);
+
+    if (!asusInfo) continue;
+    const commandUpdate = `UPDATE OR INSERT INTO TArticoli (
+      CodArticolo, 
+      CodArticoloForn, 
+      CodBarre, 
+      Extra1, 
+      Extra2, 
+      Extra3, 
+      Extra4, 
+      PrezzoIvato1, 
+      PrezzoIvato4,
+      PrezzoNetto1,
+      PrezzoNetto4, 
+      PrezzoNettoForn) VALUES (
+      '${article.CodArticolo}',
+      '${asusInfo.CodArticoloForn}',
+      '${asusInfo.CodBarre}',
+      '${formatDate(asusInfo.DATE_START)} > ${formatDate(asusInfo.DATE_END)}',
+      '€ ${formatValue(asusInfo.Extra2)}',
+      '${asusInfo.Extra3 ? asusInfo.Extra3 : ""}',
+      '€ ${formatValue(asusInfo.Extra4)}',
+      ${asusInfo.PrezzoIvato1},
+      ${asusInfo.PrezzoIvato4},
+      ${formatValue(removeIVA(asusInfo.PrezzoIvato1))},
+      ${formatValue(removeIVA(asusInfo.PrezzoIvato4))},
+      ${asusInfo.PrezzoNettoForn}
+      ) MATCHING (CodArticolo);`;
 
     try {
       await executeQuery(connection, commandUpdate).finally(() => {
         console.info(" ✅ CodArticolo:", article.CodArticolo);
-        console.info(" ✅ CodBarre:", article.CodBarre);
-        console.info(" ✅ CodArticoloForn:", asusInfo.CodArticoloForn);
       });
     } catch (err) {
       console.error(`Error!!!`, err);
